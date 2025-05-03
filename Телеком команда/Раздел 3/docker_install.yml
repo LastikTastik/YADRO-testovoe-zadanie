@@ -1,0 +1,116 @@
+---
+- name: Docker install
+  hosts: local #Выбираем группу (я выбрал группу local. В этой группе у меня пользователь - admin, и ansible_connection=local)
+  become: yes
+  vars:
+      docker_user: "{{ ansible_user }}"
+      image_name: "search_http"
+      container_name: "container_search"
+  tasks:
+
+  - name: Task install dependencies # Установка зависимостей
+    apt:
+      name:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg-agent
+        - software-properties-common
+
+      state: present
+      update_cache: yes
+
+  - name: Task add GPG key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Task add docker repository to apt
+    apt_repository:
+      repo: deb https://download.docker.com/linux/ubuntu bionic stable
+      state: present
+
+  - name: Task install docker # Установка docker
+    apt:
+      name:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+
+  - name: Task add user to docker group # Добавление пользователя в группу
+    user:
+      name: "{{ docker_user }}"
+      groups: docker
+      append: yes
+
+  - name: Task ensure group "docker" exists # Убедиться в том что группа docker существует
+    ansible.builtin.group:
+      name: docker
+      state: present
+
+  - name: Task ensure docker is active and enable # Запускаем docker
+    service:
+      name: docker
+      state: started
+      enabled: yes
+
+  - name: Task check docker version  # Выполнение команды docker --version и сохранение в переменной docker_version
+    command: docker --version
+    register: docker_version
+
+  - name: Task display docker version  # Выводим содержимое переменной docker_version на экран 
+    debug:
+      var: docker_version.stdout
+
+  - name: Task copy files to remote host # Копируем нужные нам файлы в директорию для успешного дальнейшего запуска плейбука
+    ansible.builtin.copy:
+      src: ./Docker/  # Локальный путь
+      dest: /tmp/docker_build/  # Путь на удалённом хосте либо на локальном(универсально)
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: '0755'
+
+  - name: Task build docker image from Dockerfile #Устанавливаем образ, который я сделал в предыдущем разделе
+    community.docker.docker_image:
+      name: "{{ image_name }}"
+      tag: latest
+      source: build
+      build:
+        path: /tmp/docker_build/ # путь к директории с Dockerfile
+      state: present
+
+  - name: Task delete old container # Удаляем старый контейнер, чтобы запускать новый контейнер с тем же именем и выводить свежие логи
+    command: docker rm "{{ container_name }}"
+
+  - name: Task docker run container # Запуск контейнера
+    community.docker.docker_container:
+      name: "{{ container_name }}"
+      image: "{{ image_name }}"
+      state: started
+      restart_policy: no
+      tty: yes
+    register: container_run
+
+  # Проверка кода завершения
+  - name: Task verify script executed successfully
+    assert:
+      that:
+        - container_run.container.State.ExitCode == 0
+      fail_msg: "Script failed with exit code {{ container_run.container.State.ExitCode }}"
+      success_msg: "Script executed successfully (exit code 0)"
+
+  - name: Task wait # Ждём 10 секунд, пока скрипт отработает 
+    pause:
+      seconds: 10
+
+  - name: Task get logs # Получение логов 
+    command: docker logs "{{ container_name }}"
+    register: container_logs
+
+  - name: Task display logs  #Показ логов на экране (долго мучился с ними, но показывает слишком громоздко :( ) 
+    debug:
+      msg: "{{ item | regex_replace('[\r\n]+$', '') | regex_replace('^[\\s\\=>\\)\\{\\}\\[\\]]+', '') }}"
+    loop: "{{ container_logs.stdout_lines }}"
+    when:
+      - item | length > 0
+      - not item is match('^\\s*[=\\>\\{\\}\\)\\(\\[\\]]')
